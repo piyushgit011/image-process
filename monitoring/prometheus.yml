@@ -1,0 +1,233 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "pipeline-rules.yaml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Image Processing API Server
+  - job_name: 'image-processing-api'
+    static_configs:
+      - targets: ['api-server-service:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Image Processing Workers
+  - job_name: 'image-processing-workers'
+    static_configs:
+      - targets: ['processing-workers:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Redis Cluster
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-cluster:6379']
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # Node Exporter (if available)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 30s
+
+  # Kubernetes API
+  - job_name: 'kubernetes-apiservers'
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  # Kubernetes Pods
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+  # Kubernetes Services
+  - job_name: 'kubernetes-service-endpoints'
+    kubernetes_sd_configs:
+      - role: endpoints
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scheme]
+        action: replace
+        target_label: __scheme__
+        regex: (https?)
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        action: replace
+        target_label: kubernetes_name
+
+  # Kube-state-metrics
+  - job_name: 'kube-state-metrics'
+    static_configs:
+      - targets: ['kube-state-metrics.kube-system.svc.cluster.local:8080']
+
+  # cAdvisor
+  - job_name: 'cadvisor'
+    kubernetes_sd_configs:
+      - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+# Alerting rules
+groups:
+  - name: pipeline.rules
+    rules:
+      # High queue depth alert
+      - alert: HighQueueDepth
+        expr: queue_depth > 800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High queue depth detected"
+          description: "Queue depth is {{ $value }} items"
+
+      # Processing failure alert
+      - alert: ProcessingFailure
+        expr: processing_failures > 10
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High processing failure rate"
+          description: "{{ $value }} processing failures detected"
+
+      # Low throughput alert
+      - alert: LowThroughput
+        expr: throughput_jobs_per_minute < 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low processing throughput"
+          description: "Throughput is {{ $value }} jobs/minute"
+
+      # High latency alert
+      - alert: HighLatency
+        expr: avg_processing_time > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High processing latency"
+          description: "Average processing time is {{ $value }} seconds"
+
+      # Worker health alert
+      - alert: WorkerUnhealthy
+        expr: up{job="image-processing-workers"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker pod is down"
+          description: "Worker pod {{ $labels.pod }} is not responding"
+
+      # API server health alert
+      - alert: APIServerUnhealthy
+        expr: up{job="image-processing-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API server is down"
+          description: "API server pod {{ $labels.pod }} is not responding"
+
+      # Redis health alert
+      - alert: RedisUnhealthy
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Redis pod {{ $labels.pod }} is not responding"
+
+      # Memory usage alert
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes{container="processing-worker"} / container_spec_memory_limit_bytes{container="processing-worker"}) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      # CPU usage alert
+      - alert: HighCPUUsage
+        expr: (rate(container_cpu_usage_seconds_total{container="processing-worker"}[5m]) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}%" 
