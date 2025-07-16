@@ -36,7 +36,7 @@ import threading
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from rich.panel import Panel
-import face_recognition
+
 from database_models import DatabaseManager, ProcessedImage
 from config import get_config, get_pipeline_config
 
@@ -85,8 +85,10 @@ class ModelManager:
     
     def __init__(self, config=None):
         self.config = config or get_config()
-        self.car_face_blur_model = None
-        self.yolo_detection_model = None
+        # YOLO model for person detection (used for face blurring)
+        self.person_detection_model = None
+        # YOLO model for vehicle detection
+        self.vehicle_detection_model = None
         self.models_loaded = False
         self.load_lock = threading.Lock()
         
@@ -107,13 +109,13 @@ class ModelManager:
                     if not Path(model_path).exists():
                         raise FileNotFoundError(f"Model file not found: {model_path}")
                 
-                # Load Car Face Blur Model (YOLO model for face detection/blurring)
-                console.print(f"[yellow]Loading Car Face Blur Model from {car_model_path}...[/yellow]")
-                self.car_face_blur_model = YOLO(car_model_path)
+                # Load Person Detection Model (YOLO model for person detection - used for face blurring)
+                console.print(f"[yellow]Loading Person Detection Model from {car_model_path}...[/yellow]")
+                self.person_detection_model = YOLO(car_model_path)
                 
-                # Load YOLO Detection Model (YOLO model for vehicle detection)
-                console.print(f"[yellow]Loading YOLO Detection Model from {yolo_model_path}...[/yellow]")
-                self.yolo_detection_model = YOLO(yolo_model_path)
+                # Load Vehicle Detection Model (YOLO model for vehicle detection)
+                console.print(f"[yellow]Loading Vehicle Detection Model from {yolo_model_path}...[/yellow]")
+                self.vehicle_detection_model = YOLO(yolo_model_path)
                 
                 # Log device info
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -143,12 +145,12 @@ class ModelManager:
         
         results = {
             'vehicle_detection': {},
-            'face_detection': {},
-            'car_face_blur': {},
+            'person_detection': {},  # YOLO person detection (used for face blurring)
+            'face_blur': {},
             'processing_metadata': {},
             'flags': {
                 'is_vehicle_detected': False,
-                'is_face_detected': False,
+                'is_person_detected': False,  # Person detected (face area will be blurred)
                 'is_face_blurred': False
             }
         }
@@ -160,7 +162,7 @@ class ModelManager:
             
             # Step 1: YOLO Vehicle Detection
             logger.debug("Running vehicle detection...")
-            vehicle_results = self.yolo_detection_model(image_array)[0]
+            vehicle_results = self.vehicle_detection_model(image_array)[0]
             
             vehicle_detected = False
             vehicle_boxes = []
@@ -192,9 +194,9 @@ class ModelManager:
             
             results['flags']['is_vehicle_detected'] = vehicle_detected
             
-            # Step 2: Face Detection using YOLO face model
-            logger.debug("Running face detection...")
-            face_results = self.car_face_blur_model(image_array)[0]
+            # Step 2: Person Detection using YOLO person model (for face blurring)
+            logger.debug("Running person detection...")
+            person_results = self.person_detection_model(image_array)[0]
             
             person_detected = False
             face_boxes = []
@@ -204,17 +206,17 @@ class ModelManager:
             # Create a copy of the image for processing
             processed_image = image_array.copy()
             
-            if face_results.boxes is not None:
+            if person_results.boxes is not None:
                 # Class 0 is typically 'person' in YOLO models
                 person_class = 0
                 
-                for box_idx, cls in enumerate(face_results.boxes.cls):
+                for box_idx, cls in enumerate(person_results.boxes.cls):
                     cls_value = int(cls.item())
-                    conf_value = face_results.boxes.conf[box_idx].item()
+                    conf_value = person_results.boxes.conf[box_idx].item()
                     
                     if cls_value == person_class and conf_value > face_confidence_threshold:
                         person_detected = True
-                        box = face_results.boxes.xyxy[box_idx].cpu().numpy()
+                        box = person_results.boxes.xyxy[box_idx].cpu().numpy()
                         x1, y1, x2, y2 = map(int, box)
                         
                         # Ensure box coordinates are within image bounds
@@ -239,24 +241,24 @@ class ModelManager:
                         
                         logger.debug(f"Face blurred at coordinates: ({x1},{y1},{x2},{y2}), confidence={conf_value:.2f}")
             
-            results['face_detection'] = {
-                'face_count': len(face_boxes),
-                'face_boxes': face_boxes,
-                'face_confidences': face_confidences,
-                'faces_detected': person_detected
+            results['person_detection'] = {
+                'person_count': len(face_boxes),  # Number of person bounding boxes (face areas)
+                'person_boxes': face_boxes,       # Bounding boxes for detected persons (face areas)
+                'person_confidences': face_confidences,  # Confidence scores for person detection
+                'persons_detected': person_detected
             }
-            results['flags']['is_face_detected'] = person_detected
+            results['flags']['is_person_detected'] = person_detected
             
             # Step 3: Determine if face blur was applied
             face_blur_applied = person_detected and faces_blurred > 0
             results['flags']['is_face_blurred'] = face_blur_applied
             
-            results['car_face_blur'] = {
+            results['face_blur'] = {
                 'processing_applied': face_blur_applied,
                 'faces_blurred': faces_blurred,
                 'input_shape': image_array.shape,
                 'output_shape': processed_image.shape,
-                'reason': f'Blurred {faces_blurred} faces' if face_blur_applied else 'No faces detected above threshold'
+                'reason': f'Blurred {faces_blurred} faces' if face_blur_applied else 'No persons detected above threshold'
             }
             
             # Convert processed image back to bytes
@@ -435,12 +437,12 @@ class ImageProcessingWorker:
                 job_id=job.job_id,
                 original_image_path=original_url,
                 processed_image_path=processed_url,
-                blur_metadata=results['car_face_blur'],
+                blur_metadata=results['face_blur'],
                 detection_metadata=results.get('vehicle_detection', {}),
                 processing_time=processing_time,
                 model_versions={
-                    'car_face_blur': '1.0',
-                    'yolo_detection': '8m'
+                    'person_detection': '1.0',
+                    'vehicle_detection': '8m'
                 },
                 confidence_scores={
                     'avg_detection_confidence': np.mean(results.get('vehicle_detection', {}).get('confidences', [0])) if results.get('vehicle_detection', {}).get('confidences') else 0
@@ -459,14 +461,14 @@ class ImageProcessingWorker:
                 s3_original_path=original_url,
                 s3_processed_path=processed_url,
                 is_vehicle_detected=results['flags']['is_vehicle_detected'],
-                is_face_detected=results['flags']['is_face_detected'],
+                is_face_detected=results['flags']['is_person_detected'],  # Person detection (for face blurring)
                 is_face_blurred=results['flags']['is_face_blurred'],
                 content_type=job.content_type,
                 file_size_original=len(job.image_data),
                 file_size_processed=len(processed_image),
                 processing_time_seconds=processing_time,
                 vehicle_detection_data=results.get('vehicle_detection', {}),
-                face_detection_data=results.get('face_detection', {})
+                face_detection_data=results.get('person_detection', {})  # Person detection data
             )
             
             # Update job status
@@ -478,7 +480,7 @@ class ImageProcessingWorker:
             self.stats['processed'] += 1
             self.stats['total_time'] += processing_time
             
-            console.print(f"[green]✅ Worker {self.worker_id} processed job {job.job_id} - Vehicle: {results['flags']['is_vehicle_detected']}, Face: {results['flags']['is_face_detected']}, Blurred: {results['flags']['is_face_blurred']}[/green]")
+            console.print(f"[green]✅ Worker {self.worker_id} processed job {job.job_id} - Vehicle: {results['flags']['is_vehicle_detected']}, Person: {results['flags']['is_person_detected']}, Blurred: {results['flags']['is_face_blurred']}[/green]")
             
         except Exception as e:
             logger.error(f"Error processing job {job.job_id}: {str(e)}")
