@@ -43,6 +43,7 @@ Image Upload → API Server → Redis Queue → Processing Workers → S3 Storag
 
 - Python 3.9+
 - Docker and Docker Compose
+- MySQL 8.0+ server
 - Redis server
 - AWS S3 bucket
 - Kubernetes cluster (for production)
@@ -55,24 +56,51 @@ git clone <repository>
 cd image-processing-pipeline
 ```
 
-2. **Install dependencies:**
+2. **Install and setup MySQL:**
+```bash
+# macOS (using Homebrew)
+brew install mysql
+brew services start mysql
+
+# Ubuntu/Debian
+sudo apt update
+sudo apt install mysql-server
+sudo systemctl start mysql
+
+# Create database and user
+mysql -u root -p
+```
+
+```sql
+-- In MySQL console
+CREATE DATABASE image_processing CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'pipeline_user'@'localhost' IDENTIFIED BY 'secure_password';
+GRANT ALL PRIVILEGES ON image_processing.* TO 'pipeline_user'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+```
+
+3. **Install dependencies:**
 ```bash
 pip install -r requirements.txt
 ```
 
-3. **Set environment variables:**
+4. **Set environment variables:**
 ```bash
 export AWS_ACCESS_KEY_ID="your_access_key"
 export AWS_SECRET_ACCESS_KEY="your_secret_key"
 export AWS_REGION="us-east-1"
 export S3_BUCKET="your-bucket-name"
 export REDIS_URL="redis://localhost:6379"
+export DATABASE_URL="mysql+pymysql://pipeline_user:secure_password@localhost:3306/image_processing"
 ```
 
-4. **Start with Docker Compose:**
+5. **Start with Docker Compose:**
 ```bash
 docker-compose up -d
 ```
+
+**Note:** The Docker Compose setup includes MySQL, Redis, and the application services. The MySQL service will automatically create the database and user on first startup.
 
 5. **Test the API:**
 ```bash
@@ -138,6 +166,7 @@ kubectl apply -f kubernetes_deployment.yaml
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `DATABASE_URL` | MySQL connection string | `mysql+pymysql://user:password@localhost:3306/image_processing` |
 | `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
 | `AWS_ACCESS_KEY_ID` | AWS access key | Required |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key | Required |
@@ -145,11 +174,16 @@ kubectl apply -f kubernetes_deployment.yaml
 | `S3_BUCKET` | S3 bucket name | `image-processing-bucket` |
 | `WORKER_ID` | Worker identifier | Auto-generated |
 | `LOG_LEVEL` | Logging level | `INFO` |
+| `FACE_DETECTION_MODEL_PATH` | Path to face detection model | `Car Face Blur Model.pt` |
+| `VEHICLE_DETECTION_MODEL_PATH` | Path to vehicle detection model | `Car Face Blur Yolov8m.pt` |
+| `CAR_CONFIDENCE_THRESHOLD` | Vehicle detection confidence | `0.8` |
+| `FACE_CONFIDENCE_THRESHOLD` | Face detection confidence | `0.8` |
 
 ### Pipeline Configuration
 
 ```json
 {
+  "database_url": "mysql+pymysql://pipeline_user:secure_password@mysql:3306/image_processing",
   "redis_url": "redis://redis-cluster:6379",
   "aws_config": {
     "aws_access_key_id": "your_key",
@@ -160,6 +194,39 @@ kubectl apply -f kubernetes_deployment.yaml
   "num_workers": 5,
   "max_queue_size": 1000
 }
+```
+
+### Docker Compose with MySQL
+
+The included `docker-compose.yml` provides a complete development environment with MySQL:
+
+```yaml
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: image_processing
+      MYSQL_USER: pipeline_user
+      MYSQL_PASSWORD: secure_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    environment:
+      - DATABASE_URL=mysql+pymysql://pipeline_user:secure_password@mysql:3306/image_processing
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mysql
+      - redis
 ```
 
 ## 📈 Monitoring and Observability
@@ -319,6 +386,12 @@ pytest tests/integration/ -v
    - Verify connection string
    - Monitor Redis memory usage
 
+5. **MySQL database issues**
+   - Check MySQL server status
+   - Verify database credentials
+   - Check database connectivity
+   - Monitor MySQL performance
+
 ### Debug Commands
 
 ```bash
@@ -333,6 +406,16 @@ kubectl logs -f deployment/processing-workers
 
 # Check Redis
 redis-cli -h localhost -p 6379 llen image_processing_queue
+
+# Check MySQL database
+mysql -u pipeline_user -p -e "USE image_processing; SELECT COUNT(*) FROM processed_images;"
+
+# Check MySQL server status
+sudo systemctl status mysql  # Linux
+brew services list | grep mysql  # macOS
+
+# Check database connectivity
+python -c "from config import get_config; print('DB URL:', get_config().DATABASE_URL)"
 ```
 
 ## 📚 Development
