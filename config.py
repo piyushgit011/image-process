@@ -35,7 +35,7 @@ class Config:
         self.REDIS_DB = int(os.getenv('REDIS_DB', '0'))
         
         # Database Configuration
-        self.DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///image_processing.db')
+        self.DATABASE_URL = os.getenv('DATABASE_URL', 'mysql+pymysql://user:password@localhost:3306/image_processing')
         
         # AWS Configuration
         self.AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')

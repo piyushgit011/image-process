@@ -6,7 +6,8 @@ Handles storage of processed image metadata and flags
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, Integer, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.mysql import CHAR
+from sqlalchemy import String
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -21,7 +22,7 @@ class ProcessedImage(Base):
     """Model for storing processed image metadata"""
     __tablename__ = "processed_images"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(CHAR(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     job_id = Column(String(255), unique=True, nullable=False, index=True)
     original_filename = Column(String(500), nullable=False)
     s3_original_path = Column(String(1000), nullable=True)

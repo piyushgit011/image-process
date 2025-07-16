@@ -67,7 +67,7 @@ This document summarizes the implementation of a centralized configuration syste
 
 #### Database Configuration
 - `DATABASE_URL` - SQLAlchemy-compatible database URL
-- Supports SQLite (development) and PostgreSQL (production)
+- Supports SQLite (development) and MySQL (production)
 
 #### AWS Configuration
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` - Credentials
@@ -155,7 +155,7 @@ if is_production():
 export NUM_WORKERS=10
 export API_PORT=9000
 export REDIS_URL=redis://production-redis:6379
-export DATABASE_URL=postgresql://user:pass@db:5432/pipeline
+export DATABASE_URL=mysql+pymysql://user:pass@db:3306/pipeline
 
 python api_server.py
 ```
