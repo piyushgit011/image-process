@@ -18,8 +18,9 @@ from rich.panel import Panel
 import json
 import base64
 
-from pipeline_architecture import ImageProcessingPipeline, ProcessingStatus, DEFAULT_CONFIG
+from pipeline_architecture import ImageProcessingPipeline, ProcessingStatus
 from database_models import DatabaseManager
+from config import get_config, get_pipeline_config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -57,10 +58,14 @@ async def startup_event():
     
     console.print(Panel.fit("[bold green]🚀 Starting Image Processing API Server[/bold green]"))
     
+    # Get configuration
+    app_config = get_config()
+    pipeline_config = get_pipeline_config()
+    
     # Initialize pipeline
-    pipeline = ImageProcessingPipeline(DEFAULT_CONFIG)
+    pipeline = ImageProcessingPipeline(pipeline_config)
     await pipeline.initialize()
-    await pipeline.start_workers(DEFAULT_CONFIG['num_workers'])
+    await pipeline.start_workers(app_config.NUM_WORKERS)
     
     console.print("[green]✅ API Server ready![/green]")
 
@@ -311,14 +316,15 @@ async def get_queue_status() -> Dict[str, Any]:
         Queue information
     """
     try:
+        app_config = get_config()
         queue_depth = await pipeline.queue_manager.redis_client.llen(
             pipeline.queue_manager.queue_name
         )
         
         return {
             "queue_depth": queue_depth,
-            "max_queue_size": DEFAULT_CONFIG['max_queue_size'],
-            "queue_utilization": (queue_depth / DEFAULT_CONFIG['max_queue_size']) * 100,
+            "max_queue_size": app_config.MAX_QUEUE_SIZE,
+            "queue_utilization": (queue_depth / app_config.MAX_QUEUE_SIZE) * 100,
             "timestamp": time.time()
         }
         
@@ -446,11 +452,14 @@ async def root():
     }
 
 if __name__ == "__main__":
+    # Get configuration
+    app_config = get_config()
+    
     # Run the server
     uvicorn.run(
         "api_server:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-        log_level="info"
+        host=app_config.API_HOST,
+        port=app_config.API_PORT,
+        reload=app_config.API_RELOAD,
+        log_level=app_config.API_LOG_LEVEL
     ) 

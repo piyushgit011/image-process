@@ -20,9 +20,9 @@ from pipeline_architecture import (
     ImageProcessingPipeline, 
     ModelManager, 
     RedisQueueManager, 
-    S3StorageManager,
-    DEFAULT_CONFIG
+    S3StorageManager
 )
+from config import get_config, get_pipeline_config
 
 # Configure logging
 logging.basicConfig(
@@ -35,9 +35,10 @@ console = Console()
 class StandaloneWorker:
     """Standalone worker for image processing"""
     
-    def __init__(self, worker_id: str, config: dict):
+    def __init__(self, worker_id: str, config: dict = None):
         self.worker_id = worker_id
-        self.config = config
+        self.config = config or get_pipeline_config()
+        self.app_config = get_config()
         self.running = False
         self.stats = {
             'processed': 0,
@@ -47,9 +48,9 @@ class StandaloneWorker:
         }
         
         # Initialize components
-        self.model_manager = ModelManager()
-        self.queue_manager = RedisQueueManager(config.get('redis_url', 'redis://localhost:6379'))
-        self.storage_manager = S3StorageManager(config.get('aws_config', {}))
+        self.model_manager = ModelManager(self.app_config)
+        self.queue_manager = RedisQueueManager(self.config.get('redis_url', self.app_config.get_redis_url()))
+        self.storage_manager = S3StorageManager(self.config.get('aws_config', self.app_config.aws_config))
         
     async def initialize(self):
         """Initialize worker components"""
@@ -223,25 +224,10 @@ async def main():
     # Get worker ID from environment or use default
     worker_id = os.getenv('WORKER_ID', f'worker-{int(time.time())}')
     
-    # Load configuration
-    config = DEFAULT_CONFIG.copy()
-    
-    # Override with environment variables
-    if os.getenv('REDIS_URL'):
-        config['redis_url'] = os.getenv('REDIS_URL')
-    
-    if os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY'):
-        config['aws_config'] = {
-            'aws_access_key_id': os.getenv('AWS_ACCESS_KEY_ID'),
-            'aws_secret_access_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
-            'region_name': os.getenv('AWS_REGION', 'us-east-1'),
-            'bucket_name': os.getenv('S3_BUCKET', 'image-processing-bucket')
-        }
-    
     console.print(Panel.fit(f"[bold cyan]Image Processing Worker {worker_id}[/bold cyan]"))
     
-    # Create and initialize worker
-    worker = StandaloneWorker(worker_id, config)
+    # Create and initialize worker (config will be loaded automatically)
+    worker = StandaloneWorker(worker_id)
     
     # Initialize worker
     if not await worker.initialize():

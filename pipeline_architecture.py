@@ -38,6 +38,7 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from rich.panel import Panel
 import face_recognition
 from database_models import DatabaseManager, ProcessedImage
+from config import get_config, get_pipeline_config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -82,7 +83,8 @@ class ProcessingResult:
 class ModelManager:
     """Manages loading and running of ML models"""
     
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config or get_config()
         self.car_face_blur_model = None
         self.yolo_detection_model = None
         self.models_loaded = False
@@ -97,14 +99,26 @@ class ModelManager:
             console.print("[cyan]Loading ML models...[/cyan]")
             
             try:
-                # Load Car Face Blur Model
-                console.print("[yellow]Loading Car Face Blur Model...[/yellow]")
-                self.car_face_blur_model = torch.load('Car Face Blur Model.pt', map_location='cpu')
-                self.car_face_blur_model.eval()
+                # Check if model files exist
+                car_model_path = self.config.CAR_FACE_BLUR_MODEL_PATH
+                yolo_model_path = self.config.YOLO_DETECTION_MODEL_PATH
                 
-                # Load YOLO Detection Model
-                console.print("[yellow]Loading YOLO Detection Model...[/yellow]")
-                self.yolo_detection_model = YOLO('Car Face Blur Yolov8m.pt')
+                for model_path in [car_model_path, yolo_model_path]:
+                    if not Path(model_path).exists():
+                        raise FileNotFoundError(f"Model file not found: {model_path}")
+                
+                # Load Car Face Blur Model (YOLO model for face detection/blurring)
+                console.print(f"[yellow]Loading Car Face Blur Model from {car_model_path}...[/yellow]")
+                self.car_face_blur_model = YOLO(car_model_path)
+                
+                # Load YOLO Detection Model (YOLO model for vehicle detection)
+                console.print(f"[yellow]Loading YOLO Detection Model from {yolo_model_path}...[/yellow]")
+                self.yolo_detection_model = YOLO(yolo_model_path)
+                
+                # Log device info
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                logger.info(f"Using device: {device}")
+                console.print(f"[green]Using device: {device}[/green]")
                 
                 self.models_loaded = True
                 console.print("[green]✅ Models loaded successfully![/green]")
@@ -113,37 +127,19 @@ class ModelManager:
                 console.print(f"[red]Error loading models: {str(e)}[/red]")
                 raise
     
-    async def detect_faces(self, image_array: np.ndarray) -> Dict[str, Any]:
-        """Detect faces in image using face_recognition library"""
-        try:
-            # Convert RGB to BGR for face_recognition
-            rgb_image = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
-            
-            # Find face locations
-            face_locations = face_recognition.face_locations(rgb_image)
-            
-            return {
-                'face_count': len(face_locations),
-                'face_locations': face_locations,
-                'faces_detected': len(face_locations) > 0
-            }
-        except Exception as e:
-            logger.error(f"Error in face detection: {str(e)}")
-            return {
-                'face_count': 0,
-                'face_locations': [],
-                'faces_detected': False,
-                'error': str(e)
-            }
+
 
     async def process_image(self, image_data: bytes) -> Tuple[bytes, Dict[str, Any]]:
         """Process image through detection and blur models"""
         if not self.models_loaded:
             await self.load_models()
         
-        # Convert bytes to PIL Image
-        image = Image.open(io.BytesIO(image_data))
-        image_array = np.array(image)
+        # Convert bytes to OpenCV image (BGR format)
+        nparr = np.frombuffer(image_data, np.uint8)
+        image_array = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image_array is None:
+            raise ValueError("Failed to decode image data")
         
         results = {
             'vehicle_detection': {},
@@ -158,67 +154,127 @@ class ModelManager:
         }
         
         try:
+            # Get configuration for thresholds
+            car_confidence_threshold = getattr(self.config, 'CAR_CONFIDENCE_THRESHOLD', 0.8)
+            face_confidence_threshold = getattr(self.config, 'FACE_CONFIDENCE_THRESHOLD', 0.8)
+            
             # Step 1: YOLO Vehicle Detection
-            yolo_results = self.yolo_detection_model(image_array)
-            detection_data = yolo_results[0] if yolo_results else None
+            logger.debug("Running vehicle detection...")
+            vehicle_results = self.yolo_detection_model(image_array)[0]
             
             vehicle_detected = False
-            if detection_data and detection_data.boxes is not None:
+            vehicle_boxes = []
+            vehicle_confidences = []
+            vehicle_classes = []
+            
+            if vehicle_results.boxes is not None:
                 # COCO class IDs for vehicles: 2=car, 5=bus, 7=truck, 3=motorcycle
-                vehicle_class_ids = [2, 3, 5, 7]
-                detected_classes = detection_data.boxes.cls.cpu().numpy().tolist()
-                vehicle_detected = any(int(cls) in vehicle_class_ids for cls in detected_classes)
+                vehicle_class_ids = {2, 5, 7, 3}  # car, bus, truck, motorcycle
+                
+                for box_idx, cls in enumerate(vehicle_results.boxes.cls):
+                    cls_value = int(cls.item())
+                    conf_value = vehicle_results.boxes.conf[box_idx].item()
+                    
+                    if cls_value in vehicle_class_ids and conf_value > car_confidence_threshold:
+                        vehicle_detected = True
+                        vehicle_boxes.append(vehicle_results.boxes.xyxy[box_idx].cpu().numpy().tolist())
+                        vehicle_confidences.append(conf_value)
+                        vehicle_classes.append(cls_value)
+                        logger.debug(f"Vehicle detected: class={cls_value}, confidence={conf_value:.2f}")
                 
                 results['vehicle_detection'] = {
-                    'boxes': detection_data.boxes.xyxy.cpu().numpy().tolist(),
-                    'confidences': detection_data.boxes.conf.cpu().numpy().tolist(),
-                    'class_ids': detected_classes,
-                    'detection_count': len(detection_data.boxes),
+                    'boxes': vehicle_boxes,
+                    'confidences': vehicle_confidences,
+                    'class_ids': vehicle_classes,
+                    'detection_count': len(vehicle_boxes),
                     'vehicle_detected': vehicle_detected
                 }
             
             results['flags']['is_vehicle_detected'] = vehicle_detected
             
-            # Step 2: Face Detection
-            face_results = await self.detect_faces(image_array)
-            results['face_detection'] = face_results
-            results['flags']['is_face_detected'] = face_results['faces_detected']
+            # Step 2: Face Detection using YOLO face model
+            logger.debug("Running face detection...")
+            face_results = self.car_face_blur_model(image_array)[0]
             
-            # Step 3: Apply Face Blur (only if vehicle and face detected)
+            person_detected = False
+            face_boxes = []
+            face_confidences = []
+            faces_blurred = 0
+            
+            # Create a copy of the image for processing
             processed_image = image_array.copy()
-            face_blur_applied = False
             
-            if vehicle_detected and face_results['faces_detected']:
-                # Convert to tensor format for blur model
-                image_tensor = torch.from_numpy(image_array).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            if face_results.boxes is not None:
+                # Class 0 is typically 'person' in YOLO models
+                person_class = 0
                 
-                with torch.no_grad():
-                    blur_output = self.car_face_blur_model(image_tensor)
+                for box_idx, cls in enumerate(face_results.boxes.cls):
+                    cls_value = int(cls.item())
+                    conf_value = face_results.boxes.conf[box_idx].item()
                     
-                # Convert output back to image format
-                processed_image = (blur_output.squeeze(0).permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8)
-                face_blur_applied = True
+                    if cls_value == person_class and conf_value > face_confidence_threshold:
+                        person_detected = True
+                        box = face_results.boxes.xyxy[box_idx].cpu().numpy()
+                        x1, y1, x2, y2 = map(int, box)
+                        
+                        # Ensure box coordinates are within image bounds
+                        x1 = max(0, x1)
+                        y1 = max(0, y1)
+                        x2 = min(image_array.shape[1], x2)
+                        y2 = min(image_array.shape[0], y2)
+                        
+                        # Check if box dimensions are valid
+                        if x2 <= x1 or y2 <= y1:
+                            logger.warning(f"Invalid box dimensions: ({x1},{y1},{x2},{y2})")
+                            continue
+                        
+                        face_boxes.append([x1, y1, x2, y2])
+                        face_confidences.append(conf_value)
+                        
+                        # Apply Gaussian blur to face region
+                        face_region = processed_image[y1:y2, x1:x2]
+                        blurred_face = cv2.GaussianBlur(face_region, (99, 99), 30)
+                        processed_image[y1:y2, x1:x2] = blurred_face
+                        faces_blurred += 1
+                        
+                        logger.debug(f"Face blurred at coordinates: ({x1},{y1},{x2},{y2}), confidence={conf_value:.2f}")
+            
+            results['face_detection'] = {
+                'face_count': len(face_boxes),
+                'face_boxes': face_boxes,
+                'face_confidences': face_confidences,
+                'faces_detected': person_detected
+            }
+            results['flags']['is_face_detected'] = person_detected
+            
+            # Step 3: Determine if face blur was applied
+            face_blur_applied = person_detected and faces_blurred > 0
+            results['flags']['is_face_blurred'] = face_blur_applied
             
             results['car_face_blur'] = {
                 'processing_applied': face_blur_applied,
+                'faces_blurred': faces_blurred,
                 'input_shape': image_array.shape,
                 'output_shape': processed_image.shape,
-                'reason': 'Vehicle and face detected' if face_blur_applied else 'No vehicle or no face detected'
+                'reason': f'Blurred {faces_blurred} faces' if face_blur_applied else 'No faces detected above threshold'
             }
             
-            results['flags']['is_face_blurred'] = face_blur_applied
-            
             # Convert processed image back to bytes
-            processed_pil = Image.fromarray(processed_image)
-            img_byte_arr = io.BytesIO()
-            processed_pil.save(img_byte_arr, format='JPEG', quality=95)
-            processed_bytes = img_byte_arr.getvalue()
+            is_success, buffer = cv2.imencode('.jpg', processed_image)
+            if not is_success:
+                raise ValueError("Failed to encode processed image")
+            
+            processed_bytes = buffer.tobytes()
             
             results['processing_metadata'] = {
                 'original_size': len(image_data),
                 'processed_size': len(processed_bytes),
-                'compression_ratio': len(processed_bytes) / len(image_data) if len(image_data) > 0 else 0
+                'compression_ratio': len(processed_bytes) / len(image_data) if len(image_data) > 0 else 0,
+                'car_confidence_threshold': car_confidence_threshold,
+                'face_confidence_threshold': face_confidence_threshold
             }
+            
+            logger.info(f"Image processing complete - Vehicle: {vehicle_detected}, Faces: {person_detected}, Blurred: {face_blur_applied}")
             
             return processed_bytes, results
             
@@ -229,8 +285,8 @@ class ModelManager:
 class RedisQueueManager:
     """Manages Redis-based job queue"""
     
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
-        self.redis_url = redis_url
+    def __init__(self, redis_url: str = None):
+        self.redis_url = redis_url or get_config().get_redis_url()
         self.redis_client = None
         self.queue_name = "image_processing_queue"
         self.processing_queue = "processing_queue"
@@ -439,12 +495,13 @@ class ImageProcessingWorker:
 class ImageProcessingPipeline:
     """Main pipeline orchestrator"""
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.model_manager = ModelManager()
-        self.queue_manager = RedisQueueManager(config.get('redis_url', 'redis://localhost:6379'))
-        self.storage_manager = S3StorageManager(config.get('aws_config', {}))
-        self.database_manager = DatabaseManager(config.get('database_url', 'sqlite:///image_processing.db'))
+    def __init__(self, config: Dict[str, Any] = None):
+        self.config = config or get_pipeline_config()
+        self.app_config = get_config()
+        self.model_manager = ModelManager(self.app_config)
+        self.queue_manager = RedisQueueManager(self.config.get('redis_url', self.app_config.get_redis_url()))
+        self.storage_manager = S3StorageManager(self.config.get('aws_config', self.app_config.aws_config))
+        self.database_manager = DatabaseManager(self.config.get('database_url', self.app_config.DATABASE_URL))
         self.workers: List[ImageProcessingWorker] = []
         self.running = False
         
@@ -535,30 +592,20 @@ class ImageProcessingPipeline:
         
         console.print("[yellow]🛑 Pipeline stopped[/yellow]")
 
-# Configuration
-DEFAULT_CONFIG = {
-    'redis_url': 'redis://localhost:6379',
-    'database_url': 'sqlite:///image_processing.db',  # Use PostgreSQL for production: 'postgresql://user:pass@localhost/dbname'
-    'aws_config': {
-        'aws_access_key_id': 'YOUR_ACCESS_KEY',
-        'aws_secret_access_key': 'YOUR_SECRET_KEY',
-        'region_name': 'us-east-1',
-        'bucket_name': 'image-processing-bucket'
-    },
-    'num_workers': 5,
-    'max_queue_size': 1000
-}
-
 async def main():
     """Main pipeline execution"""
     console.print(Panel.fit("[bold cyan]Car Face Blur Image Processing Pipeline[/bold cyan]"))
     
+    # Get configuration
+    app_config = get_config()
+    pipeline_config = get_pipeline_config()
+    
     # Initialize pipeline
-    pipeline = ImageProcessingPipeline(DEFAULT_CONFIG)
+    pipeline = ImageProcessingPipeline(pipeline_config)
     await pipeline.initialize()
     
     # Start workers
-    await pipeline.start_workers(DEFAULT_CONFIG['num_workers'])
+    await pipeline.start_workers(app_config.NUM_WORKERS)
     
     # Keep pipeline running
     try:
