@@ -102,20 +102,20 @@ class ModelManager:
             
             try:
                 # Check if model files exist
-                car_model_path = self.config.CAR_FACE_BLUR_MODEL_PATH
-                yolo_model_path = self.config.YOLO_DETECTION_MODEL_PATH
+                face_model_path = self.config.FACE_DETECTION_MODEL_PATH
+                vehicle_model_path = self.config.VEHICLE_DETECTION_MODEL_PATH
                 
-                for model_path in [car_model_path, yolo_model_path]:
+                for model_path in [face_model_path, vehicle_model_path]:
                     if not Path(model_path).exists():
                         raise FileNotFoundError(f"Model file not found: {model_path}")
                 
-                # Load Person Detection Model (YOLO model for person detection - used for face blurring)
-                console.print(f"[yellow]Loading Person Detection Model from {car_model_path}...[/yellow]")
-                self.person_detection_model = YOLO(car_model_path)
+                # Load Face/Person Detection Model (YOLO model for person detection - used for face blurring)
+                console.print(f"[yellow]Loading Face/Person Detection Model from {face_model_path}...[/yellow]")
+                self.person_detection_model = YOLO(face_model_path)
                 
                 # Load Vehicle Detection Model (YOLO model for vehicle detection)
-                console.print(f"[yellow]Loading Vehicle Detection Model from {yolo_model_path}...[/yellow]")
-                self.vehicle_detection_model = YOLO(yolo_model_path)
+                console.print(f"[yellow]Loading Vehicle Detection Model from {vehicle_model_path}...[/yellow]")
+                self.vehicle_detection_model = YOLO(vehicle_model_path)
                 
                 # Log device info
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -128,6 +128,42 @@ class ModelManager:
             except Exception as e:
                 console.print(f"[red]Error loading models: {str(e)}[/red]")
                 raise
+    
+    async def detect_vehicles_in_image(self, image_data: bytes) -> bool:
+        """Centralized vehicle detection method to eliminate duplicate logic"""
+        if not self.models_loaded:
+            await self.load_models()
+        
+        try:
+            # Convert bytes to OpenCV image (BGR format)
+            nparr = np.frombuffer(image_data, np.uint8)
+            image_array = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if image_array is None:
+                logger.warning("Failed to decode image data for vehicle detection")
+                return False
+            
+            # Run vehicle detection
+            vehicle_results = self.vehicle_detection_model(image_array)[0]
+            
+            if vehicle_results.boxes is not None:
+                # COCO class IDs for vehicles: 2=car, 5=bus, 7=truck, 3=motorcycle
+                vehicle_class_ids = {2, 5, 7, 3}  # car, bus, truck, motorcycle
+                car_confidence_threshold = getattr(self.config, 'CAR_CONFIDENCE_THRESHOLD', 0.8)
+                
+                for box_idx, cls in enumerate(vehicle_results.boxes.cls):
+                    cls_value = int(cls.item())
+                    conf_value = vehicle_results.boxes.conf[box_idx].item()
+                    
+                    if cls_value in vehicle_class_ids and conf_value > car_confidence_threshold:
+                        logger.debug(f"Vehicle detected: class={cls_value}, confidence={conf_value:.2f}")
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error in vehicle detection: {str(e)}")
+            return False
     
 
 

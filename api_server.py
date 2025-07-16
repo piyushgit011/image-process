@@ -118,25 +118,9 @@ async def upload_image(
         if len(image_data) == 0:
             raise HTTPException(status_code=400, detail="Empty image data")
         
-        # Run YOLO detection first (car detection)
+        # Use centralized vehicle detection method
         model_manager = pipeline.model_manager
-        if not model_manager.models_loaded:
-            await model_manager.load_models()
-        
-        # Use YOLO to check for car
-        from PIL import Image
-        import io
-        import numpy as np
-        pil_image = Image.open(io.BytesIO(image_data)).convert('RGB')
-        image_array = np.array(pil_image)
-        yolo_results = model_manager.yolo_detection_model(image_array)
-        detection_data = yolo_results[0] if yolo_results else None
-        car_detected = False
-        if detection_data and detection_data.boxes is not None:
-            # COCO class 2 is 'car', 7 is 'truck', 5 is 'bus', 3 is 'motorcycle', 0 is 'person'
-            car_class_ids = [2, 5, 7]  # car, bus, truck
-            detected_classes = detection_data.boxes.cls.cpu().numpy().tolist()
-            car_detected = any(int(cls) in car_class_ids for cls in detected_classes)
+        car_detected = await model_manager.detect_vehicles_in_image(image_data)
         
         if not car_detected:
             return {
@@ -266,22 +250,9 @@ async def batch_upload_images(
             image_data = await file.read()
             if len(image_data) == 0:
                 continue
-            # Run YOLO detection for car
+            # Use centralized vehicle detection method
             model_manager = pipeline.model_manager
-            if not model_manager.models_loaded:
-                await model_manager.load_models()
-            from PIL import Image
-            import io
-            import numpy as np
-            pil_image = Image.open(io.BytesIO(image_data)).convert('RGB')
-            image_array = np.array(pil_image)
-            yolo_results = model_manager.yolo_detection_model(image_array)
-            detection_data = yolo_results[0] if yolo_results else None
-            car_detected = False
-            if detection_data and detection_data.boxes is not None:
-                car_class_ids = [2, 5, 7]
-                detected_classes = detection_data.boxes.cls.cpu().numpy().tolist()
-                car_detected = any(int(cls) in car_class_ids for cls in detected_classes)
+            car_detected = await model_manager.detect_vehicles_in_image(image_data)
             if not car_detected:
                 skipped += 1
                 continue

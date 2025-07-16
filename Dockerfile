@@ -49,8 +49,23 @@ COPY . .
 RUN mkdir -p /app/models
 
 # Copy model files (if they exist in the build context)
-COPY "Car Face Blur Model.pt" /app/models/
-COPY "Car Face Blur Yolov8m.pt" /app/models/
+# Create a script to handle optional model file copying
+RUN echo '#!/bin/bash\n\
+if [ -f "Car Face Blur Model.pt" ]; then\n\
+    echo "Copying Car Face Blur Model.pt to models/"\n\
+    cp "Car Face Blur Model.pt" /app/models/\n\
+else\n\
+    echo "Car Face Blur Model.pt not found - will be loaded at runtime"\n\
+fi\n\
+if [ -f "Car Face Blur Yolov8m.pt" ]; then\n\
+    echo "Copying Car Face Blur Yolov8m.pt to models/"\n\
+    cp "Car Face Blur Yolov8m.pt" /app/models/\n\
+else\n\
+    echo "Car Face Blur Yolov8m.pt not found - will be loaded at runtime"\n\
+fi' > /app/copy_models.sh && chmod +x /app/copy_models.sh
+
+# Run the model copying script
+RUN /app/copy_models.sh || true
 
 # Set permissions
 RUN chmod +x /app/start.sh

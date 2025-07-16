@@ -55,8 +55,10 @@ class Config:
         self.WORKER_TIMEOUT = int(os.getenv('WORKER_TIMEOUT', '300'))
         
         # Model Configuration
-        self.CAR_FACE_BLUR_MODEL_PATH = os.getenv('CAR_FACE_BLUR_MODEL_PATH', 'Car Face Blur Model.pt')
-        self.YOLO_DETECTION_MODEL_PATH = os.getenv('YOLO_DETECTION_MODEL_PATH', 'Car Face Blur Yolov8m.pt')
+        # FACE_DETECTION_MODEL_PATH should be for face/person detection
+        self.FACE_DETECTION_MODEL_PATH = os.getenv('FACE_DETECTION_MODEL_PATH', 'Car Face Blur Model.pt')
+        # VEHICLE_DETECTION_MODEL_PATH should be for vehicle detection
+        self.VEHICLE_DETECTION_MODEL_PATH = os.getenv('VEHICLE_DETECTION_MODEL_PATH', 'Car Face Blur Yolov8m.pt')
         
         # Detection Thresholds
         self.CAR_CONFIDENCE_THRESHOLD = float(os.getenv('CAR_CONFIDENCE_THRESHOLD', '0.8'))
@@ -92,11 +94,11 @@ class Config:
                 required_vars.append('AWS_SECRET_ACCESS_KEY')
         
         # Check model files exist
-        if not Path(self.CAR_FACE_BLUR_MODEL_PATH).exists():
-            logger.warning(f"Car Face Blur model not found at: {self.CAR_FACE_BLUR_MODEL_PATH}")
+        if not Path(self.FACE_DETECTION_MODEL_PATH).exists():
+            logger.warning(f"Face detection model not found at: {self.FACE_DETECTION_MODEL_PATH}")
         
-        if not Path(self.YOLO_DETECTION_MODEL_PATH).exists():
-            logger.warning(f"YOLO detection model not found at: {self.YOLO_DETECTION_MODEL_PATH}")
+        if not Path(self.VEHICLE_DETECTION_MODEL_PATH).exists():
+            logger.warning(f"Vehicle detection model not found at: {self.VEHICLE_DETECTION_MODEL_PATH}")
         
         if required_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(required_vars)}")
@@ -128,8 +130,8 @@ class Config:
             'max_queue_size': self.MAX_QUEUE_SIZE,
             'worker_timeout': self.WORKER_TIMEOUT,
             'model_paths': {
-                'car_face_blur': self.CAR_FACE_BLUR_MODEL_PATH,
-                'yolo_detection': self.YOLO_DETECTION_MODEL_PATH
+                'face_detection': self.FACE_DETECTION_MODEL_PATH,
+                'vehicle_detection': self.VEHICLE_DETECTION_MODEL_PATH
             }
         }
     

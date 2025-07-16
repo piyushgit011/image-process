@@ -22,6 +22,7 @@ from pipeline_architecture import (
     RedisQueueManager, 
     S3StorageManager
 )
+from database_models import DatabaseManager
 from config import get_config, get_pipeline_config
 
 # Configure logging
@@ -51,6 +52,7 @@ class StandaloneWorker:
         self.model_manager = ModelManager(self.app_config)
         self.queue_manager = RedisQueueManager(self.config.get('redis_url', self.app_config.get_redis_url()))
         self.storage_manager = S3StorageManager(self.config.get('aws_config', self.app_config.aws_config))
+        self.database_manager = DatabaseManager(self.config.get('database_url', self.app_config.DATABASE_URL))
         
     async def initialize(self):
         """Initialize worker components"""
@@ -64,6 +66,10 @@ class StandaloneWorker:
             # Connect to S3
             await self.storage_manager.connect()
             console.print(f"[green]✅ Worker {self.worker_id} connected to S3[/green]")
+            
+            # Initialize database
+            await self.database_manager.initialize()
+            console.print(f"[green]✅ Worker {self.worker_id} connected to database[/green]")
             
             # Load models
             await self.model_manager.load_models()
@@ -94,18 +100,8 @@ class StandaloneWorker:
             if not image_data:
                 raise ValueError("No image data provided")
             
-            # Run YOLO detection for car
-            if not self.model_manager.models_loaded:
-                await self.model_manager.load_models()
-            pil_image = Image.open(io.BytesIO(image_data)).convert('RGB')
-            image_array = np.array(pil_image)
-            yolo_results = self.model_manager.yolo_detection_model(image_array)
-            detection_data = yolo_results[0] if yolo_results else None
-            car_detected = False
-            if detection_data and detection_data.boxes is not None:
-                car_class_ids = [2, 5, 7]
-                detected_classes = detection_data.boxes.cls.cpu().numpy().tolist()
-                car_detected = any(int(cls) in car_class_ids for cls in detected_classes)
+            # Use centralized vehicle detection method
+            car_detected = await self.model_manager.detect_vehicles_in_image(image_data)
             if not car_detected:
                 # Mark as skipped, do not upload
                 await self.queue_manager.update_job_status(job_id, 'skipped', {
@@ -129,25 +125,45 @@ class StandaloneWorker:
                 processed_image, processed_key, 'image/jpeg'
             )
             # Prepare processing result
+            processing_time = time.time() - start_time
             processing_result = {
                 'job_id': job_id,
                 'original_image_path': original_url,
                 'processed_image_path': processed_url,
-                'blur_metadata': results.get('car_face_blur', {}),
-                'detection_metadata': results.get('yolo_detection', {}),
-                'processing_time': time.time() - start_time,
+                'blur_metadata': results.get('face_blur', {}),
+                'detection_metadata': results.get('vehicle_detection', {}),
+                'processing_time': processing_time,
                 'model_versions': {
-                    'car_face_blur': '1.0',
-                    'yolo_detection': '8m'
+                    'person_detection': '1.0',
+                    'vehicle_detection': '8m'
                 },
                 'confidence_scores': {
-                    'avg_detection_confidence': results.get('yolo_detection', {}).get('confidences', [0])
+                    'avg_detection_confidence': np.mean(results.get('vehicle_detection', {}).get('confidences', [0])) if results.get('vehicle_detection', {}).get('confidences') else 0
                 }
             }
+            
             # Upload metadata
             metadata_url = await self.storage_manager.upload_metadata(
                 processing_result, metadata_key
             )
+            
+            # Save to database with flags
+            await self.database_manager.save_processed_image(
+                job_id=job_id,
+                original_filename=filename,
+                s3_original_path=original_url,
+                s3_processed_path=processed_url,
+                is_vehicle_detected=results['flags']['is_vehicle_detected'],
+                is_face_detected=results['flags']['is_person_detected'],  # Person detection (for face blurring)
+                is_face_blurred=results['flags']['is_face_blurred'],
+                content_type=content_type,
+                file_size_original=len(image_data),
+                file_size_processed=len(processed_image),
+                processing_time_seconds=processing_time,
+                vehicle_detection_data=results.get('vehicle_detection', {}),
+                face_detection_data=results.get('person_detection', {})  # Person detection data
+            )
+            
             # Update job status
             await self.queue_manager.update_job_status(job_id, 'completed', processing_result)
             # Update stats
