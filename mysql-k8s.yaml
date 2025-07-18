@@ -1,0 +1,378 @@
+---
+# MySQL Secret for storing passwords
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: image-processing-pipeline
+type: Opaque
+data:
+  root-password: cm9vdF9wYXNzd29yZF8xMjM=  # base64 encoded: root_password_123
+  user-password: c2VjdXJlX3Bhc3N3b3JkXzEyMw==  # base64 encoded: secure_password_123
+
+---
+# MySQL ConfigMap for configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: image-processing-pipeline
+data:
+  my.cnf: |
+    [mysqld]
+    # Basic settings
+    user = mysql
+    pid-file = /var/run/mysqld/mysqld.pid
+    socket = /var/run/mysqld/mysqld.sock
+    port = 3306
+    basedir = /usr
+    datadir = /var/lib/mysql
+    tmpdir = /tmp
+    lc-messages-dir = /usr/share/mysql
+    
+    # Character set and collation
+    character-set-server = utf8mb4
+    collation-server = utf8mb4_unicode_ci
+    init_connect = 'SET NAMES utf8mb4'
+    
+    # Performance tuning
+    innodb_buffer_pool_size = 2G
+    innodb_log_file_size = 256M
+    innodb_flush_log_at_trx_commit = 2
+    innodb_flush_method = O_DIRECT
+    innodb_file_per_table = 1
+    innodb_open_files = 400
+    
+    # Connection settings
+    max_connections = 200
+    max_connect_errors = 1000000
+    max_allowed_packet = 64M
+    wait_timeout = 28800
+    interactive_timeout = 28800
+    
+    # Query cache (disabled in MySQL 8.0+)
+    # query_cache_type = 1
+    # query_cache_size = 128M
+    
+    # Logging
+    slow_query_log = 1
+    slow_query_log_file = /var/lib/mysql/slow.log
+    long_query_time = 2
+    log_error = /var/lib/mysql/error.log
+    
+    # Binary logging for replication
+    log-bin = mysql-bin
+    binlog_format = ROW
+    expire_logs_days = 7
+    max_binlog_size = 100M
+    
+    # Security
+    skip-name-resolve
+    
+    # MyISAM settings
+    key_buffer_size = 128M
+    table_open_cache = 400
+    sort_buffer_size = 4M
+    read_buffer_size = 2M
+    read_rnd_buffer_size = 8M
+    myisam_sort_buffer_size = 64M
+    thread_cache_size = 8
+    
+    # InnoDB settings
+    innodb_lock_wait_timeout = 50
+    innodb_thread_concurrency = 0
+    innodb_read_io_threads = 4
+    innodb_write_io_threads = 4
+    
+    [mysql]
+    default-character-set = utf8mb4
+    
+    [client]
+    default-character-set = utf8mb4
+
+---
+# MySQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: image-processing-pipeline
+  labels:
+    app: mysql
+    component: database
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+        component: database
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        ports:
+        - containerPort: 3306
+          name: mysql
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: root-password
+        - name: MYSQL_DATABASE
+          value: image_processing
+        - name: MYSQL_USER
+          value: pipeline_user
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: user-password
+        - name: MYSQL_CHARACTER_SET_SERVER
+          value: utf8mb4
+        - name: MYSQL_COLLATION_SERVER
+          value: utf8mb4_unicode_ci
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+        - name: mysql-config
+          mountPath: /etc/mysql/conf.d
+        - name: mysql-init
+          mountPath: /docker-entrypoint-initdb.d
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          exec:
+            command:
+            - mysqladmin
+            - ping
+            - -h
+            - localhost
+            - -u
+            - root
+            - -proot_password_123
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - mysqladmin
+            - ping
+            - -h
+            - localhost
+            - -u
+            - pipeline_user
+            - -psecure_password_123
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          exec:
+            command:
+            - mysqladmin
+            - ping
+            - -h
+            - localhost
+            - -u
+            - root
+            - -proot_password_123
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      volumes:
+      - name: mysql-config
+        configMap:
+          name: mysql-config
+      - name: mysql-init
+        configMap:
+          name: mysql-init-scripts
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 100Gi
+      storageClassName: fast-ssd
+
+---
+# MySQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: image-processing-pipeline
+  labels:
+    app: mysql
+    component: database
+spec:
+  ports:
+  - port: 3306
+    targetPort: 3306
+    protocol: TCP
+    name: mysql
+  selector:
+    app: mysql
+  clusterIP: None  # Headless service for StatefulSet
+
+---
+# MySQL Service for external access (optional)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-external
+  namespace: image-processing-pipeline
+  labels:
+    app: mysql
+    component: database
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 3306
+    targetPort: 3306
+    protocol: TCP
+    name: mysql
+  selector:
+    app: mysql
+
+---
+# ConfigMap for MySQL initialization scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-init-scripts
+  namespace: image-processing-pipeline
+data:
+  01-init.sql: |
+    -- MySQL Initialization Script for Image Processing Pipeline
+    USE image_processing;
+    
+    -- Create indexes for better performance (will be applied after table creation)
+    DELIMITER //
+    CREATE PROCEDURE CreateIndexesIfTableExists()
+    BEGIN
+        DECLARE table_count INT DEFAULT 0;
+        
+        SELECT COUNT(*) INTO table_count 
+        FROM information_schema.tables 
+        WHERE table_schema = 'image_processing' 
+        AND table_name = 'processed_images';
+        
+        IF table_count > 0 THEN
+            SET @sql = 'CREATE INDEX IF NOT EXISTS idx_processed_images_job_id ON processed_images(job_id)';
+            PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+            
+            SET @sql = 'CREATE INDEX IF NOT EXISTS idx_processed_images_created_at ON processed_images(created_at)';
+            PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+            
+            SET @sql = 'CREATE INDEX IF NOT EXISTS idx_processed_images_vehicle_detected ON processed_images(is_vehicle_detected)';
+            PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+            
+            SET @sql = 'CREATE INDEX IF NOT EXISTS idx_processed_images_face_detected ON processed_images(is_face_detected)';
+            PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+            
+            SET @sql = 'CREATE INDEX IF NOT EXISTS idx_processed_images_face_blurred ON processed_images(is_face_blurred)';
+            PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+        END IF;
+    END //
+    DELIMITER ;
+    
+    -- Performance settings
+    SET GLOBAL innodb_buffer_pool_size = 2147483648;
+    SET GLOBAL max_connections = 200;
+    SET GLOBAL wait_timeout = 28800;
+    SET GLOBAL interactive_timeout = 28800;
+    SET GLOBAL slow_query_log = 'ON';
+    SET GLOBAL long_query_time = 2;
+    
+    -- Create monitoring user
+    CREATE USER IF NOT EXISTS 'monitor'@'%' IDENTIFIED BY 'monitor_password';
+    GRANT PROCESS, REPLICATION CLIENT ON *.* TO 'monitor'@'%';
+    GRANT SELECT ON performance_schema.* TO 'monitor'@'%';
+    FLUSH PRIVILEGES;
+    
+    SELECT 'MySQL initialization completed for Image Processing Pipeline' AS status;
+
+---
+# MySQL Monitoring Service (for Prometheus)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-metrics
+  namespace: image-processing-pipeline
+  labels:
+    app: mysql
+    component: metrics
+spec:
+  ports:
+  - port: 9104
+    targetPort: 9104
+    protocol: TCP
+    name: metrics
+  selector:
+    app: mysql-exporter
+
+---
+# MySQL Exporter for Prometheus monitoring
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-exporter
+  namespace: image-processing-pipeline
+  labels:
+    app: mysql-exporter
+    component: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql-exporter
+  template:
+    metadata:
+      labels:
+        app: mysql-exporter
+        component: monitoring
+    spec:
+      containers:
+      - name: mysql-exporter
+        image: prom/mysqld-exporter:latest
+        ports:
+        - containerPort: 9104
+          name: metrics
+        env:
+        - name: DATA_SOURCE_NAME
+          value: "monitor:monitor_password@(mysql:3306)/"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 9104
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: 9104
+          initialDelaySeconds: 5
+          periodSeconds: 5
